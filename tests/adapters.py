@@ -716,7 +716,7 @@ def run_train_bpe(
     with Pool(processes=num_processes) as pool:
         results: list[dict[str, int]] = pool.starmap(pre_tokenize_chunk, arg_list)
 
-    pretoken_cnt = {}
+    pretoken_cnt = {}  #
     for d in results:
         for k, v in d.items():
             if k in pretoken_cnt:
