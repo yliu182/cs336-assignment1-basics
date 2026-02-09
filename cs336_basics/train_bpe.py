@@ -1,6 +1,5 @@
 # pytest cs336-assignment1-basics/tests/test_train_bpe.py
 import logging
-import multiprocessing
 import os
 from collections import Counter, defaultdict
 from multiprocessing import Pool
@@ -30,7 +29,8 @@ def _find_chunk_boundaries(
         split_special_token, bytes
     ), "Must represent special token as a bytestring"
 
-    with open(input_path, "r") as file:
+    # Open file in BINARY mode since we're working with bytes
+    with open(input_path, "rb") as file:
         # Get total file size in bytes
         file.seek(0, os.SEEK_END)
         file_size = file.tell()
@@ -57,7 +57,7 @@ def _find_chunk_boundaries(
                     break
 
                 # Find the special token in the mini chunk
-                found_at = mini_chunk.encode("utf-8").find(split_special_token)
+                found_at = mini_chunk.find(split_special_token)
                 if found_at != -1:
                     chunk_boundaries[bi] = initial_position + found_at
                     break
@@ -85,27 +85,66 @@ def _pre_tokenize_chunk(
     start: int,
     end: int,
     input_path: str,
+    special_tokens: list[str] | None = None,
 ) -> dict[str, int]:
     """
     Given a file and a list of chunk boundaries, tokenize the file into chunks.
+    Special tokens are excluded from tokenization to prevent them from being merged.
     """
-    #  assert isinstance(
-    #      special_tokens, list
-    #  ), "Must represent special tokens as a list of strings"
-
     # Read the file in chunks
     with open(input_path, "rb") as file:
         file.seek(start)
         chunk_bytes = file.read(end - start)
-        # pretoken_to_cnt = get_pretoken_counts(chunk_bytes)
         input_str = chunk_bytes.decode("utf-8")
+
         counts = {}
-        for match in re.finditer(PAT, input_str):
-            token = match.group()
-            if token in counts:
-                counts[token] += 1
-            else:
-                counts[token] = 1
+
+        # If we have special tokens, we need to split the input on them first
+        # to avoid tokenizing parts of special tokens
+        if special_tokens:
+            # Build a regex pattern that matches any special token
+            # Escape special regex characters in the tokens
+            # # Let's say these are your special tokens
+            # special_tokens = ["<|endoftext|>", "[MASK]", "user.name"]
+
+            # # WITHOUT escaping - these tokens contain special regex characters:
+            # # "|" means OR in regex
+            # # "[" and "]" define a character class
+            # # "." matches any single character
+
+            # # WITH escaping:
+            # escaped_tokens = [re.escape(tok) for tok in special_tokens]
+
+            # print("Original tokens:", special_tokens)
+            # print("Escaped tokens:", escaped_tokens)
+            # Original tokens: ['<|endoftext|>', '[MASK]', 'user.name']
+            # Escaped tokens:  ['<\\|endoftext\\|>', '\\[MASK\\]', 'user\\.name']
+            escaped_tokens = [re.escape(tok) for tok in special_tokens]
+            special_pattern = "|".join(escaped_tokens)
+
+            # Split on special tokens, keeping the delimiters
+            # We'll only apply pretokenization to non-special parts
+            parts = re.split(f"({special_pattern})", input_str)
+
+            for part in parts:
+                if part in special_tokens:
+                    # Skip special tokens - don't include them in BPE training
+                    continue
+                # Apply normal pretokenization to non-special parts
+                for match in re.finditer(PAT, part):
+                    token = match.group()
+                    if token in counts:
+                        counts[token] += 1
+                    else:
+                        counts[token] = 1
+        else:
+            # No special tokens, just apply normal pretokenization
+            for match in re.finditer(PAT, input_str):
+                token = match.group()
+                if token in counts:
+                    counts[token] += 1
+                else:
+                    counts[token] = 1
 
     return counts
 
@@ -160,26 +199,21 @@ def train_bpe(
     for i, special_token in enumerate(special_tokens):
         vocab[256 + i] = special_token.encode("utf-8")
 
-    num_processes = 2
+    num_processes = 4
     boundaries = _find_chunk_boundaries(input_path, num_processes, b"<|endoftext|>")
 
-    arg_list: list[tuple[int, int, str]] = []
+    arg_list: list[tuple[int, int, str, list[str] | None]] = []
     for i in range(len(boundaries) - 1):
-        arg_list.append((boundaries[i], boundaries[i + 1], input_path))
-
-    # Use "fork" start method - this is much more reliable than "spawn" (default on some systems)
-    # "fork" copies the parent process memory, avoiding the need to re-import modules
-    # which can cause deadlocks especially when running under pytest
-    # mp_context = multiprocessing.get_context("fork")
-    # with mp_context.Pool(processes=num_processes) as pool:
+        arg_list.append((boundaries[i], boundaries[i + 1], input_path, special_tokens))
 
     with Pool(num_processes) as p:
         results: list[dict[str, int]] = p.starmap(_pre_tokenize_chunk, arg_list)
 
+    # Build pretoken_freq: maps tuple of bytes -> count
+    # Also build an index from each pair -> set of pretoken tuples that contain it
     pretoken_freq: dict[tuple[bytes, ...], int] = {}
     for d in results:
         for k, v in d.items():
-            # Convert string to bytes, then split into individual bytes
             k_bytes = k.encode("utf-8")
             t = tuple(bytes([b]) for b in k_bytes)
             if t in pretoken_freq:
@@ -187,67 +221,127 @@ def train_bpe(
             else:
                 pretoken_freq[t] = v
 
-    # for key, value in list(pretoken_freq.items())[:3]:
-    #     print(f"--- {key}: {value}")
-
     merges: list[tuple[bytes, bytes]] = []
 
-    # # initialization phase, convert every single byte to a token id
-    # for pretoken_str, cnt in pretoken_cnt.items():
-    #     token_id_list = list(map(int, pretoken_str.encode("utf-8")))
-    #     pretoken_indices[pretoken_str] = token_id_list
-    #     for token_id in token_id_list:
-    #         vocab[token_id] = token_id.to_bytes(1)
+    # Initialize pair frequency using a dict for faster operations
+    pair_freq: dict[tuple[bytes, bytes], int] = {}
+    # Index: pair -> set of pretoken_tuples containing this pair
+    pair_to_pretokens: dict[tuple[bytes, bytes], set[tuple[bytes, ...]]] = {}
 
-    logging.info("Initializing byte pair frequency table")
-    pair_freq = Counter()
     for byte_tuple, cnt in pretoken_freq.items():
         for i in range(len(byte_tuple) - 1):
-            pair_freq[(byte_tuple[i], byte_tuple[i + 1])] += cnt
+            pair = (byte_tuple[i], byte_tuple[i + 1])
+            if pair in pair_freq:
+                pair_freq[pair] += cnt
+            else:
+                pair_freq[pair] = cnt
+            # Build index
+            if pair not in pair_to_pretokens:
+                pair_to_pretokens[pair] = set()
+            pair_to_pretokens[pair].add(byte_tuple)
 
     assert vocab_size > len(
         vocab
     ), "Target vocab size must be larger than the number of special tokens"
 
-    while len(vocab) < vocab_size:
+    num_merges = vocab_size - len(vocab)
+
+    for _ in range(num_merges):
+        if not pair_freq:
+            break
+
+        # Find the most frequent pair (with lexicographic tie-breaking)
         most_freq_pair = max(pair_freq, key=lambda k: (pair_freq[k], k))
+
+        # Skip if count is 0 or negative
+        if pair_freq[most_freq_pair] <= 0:
+            # Clean up zero/negative entries and try again
+            pair_freq = {k: v for k, v in pair_freq.items() if v > 0}
+            if not pair_freq:
+                break
+            most_freq_pair = max(pair_freq, key=lambda k: (pair_freq[k], k))
+
         merges.append(most_freq_pair)
+        new_token = b"".join(most_freq_pair)
+        new_id = len(vocab)
+        vocab[new_id] = new_token
 
-        # Update the vocab
-        new_id = max(vocab.keys()) + 1
-        vocab[new_id] = b"".join(most_freq_pair)
+        # Only update pretokens that contain this pair
+        affected_pretokens = pair_to_pretokens.get(most_freq_pair, set()).copy()
 
-        # Update the pre-token frequency table and pair frequency table
-        new_pretoken_freq = {}
+        for old_tuple in affected_pretokens:
+            if old_tuple not in pretoken_freq:
+                continue
 
-        for pretoken_tuple, cnt in pretoken_freq.items():
+            cnt = pretoken_freq[old_tuple]
+
+            # Build new tuple by merging all occurrences of the pair
+            new_list = []
             i = 0
-            while i < len(pretoken_tuple):
-                if pretoken_tuple[i : i + 2] == most_freq_pair:
-                    pretoken_tuple, prefix, suffix = _update_byte_tuple(
-                        pretoken_tuple, i
-                    )
+            while i < len(old_tuple):
+                if (
+                    i < len(old_tuple) - 1
+                    and (old_tuple[i], old_tuple[i + 1]) == most_freq_pair
+                ):
+                    # Before merge: update frequencies for adjacent pairs
+                    # Left neighbor loses old pair, gains new pair
+                    if new_list:
+                        old_left_pair = (new_list[-1], most_freq_pair[0])
+                        pair_freq[old_left_pair] = pair_freq.get(old_left_pair, 0) - cnt
+                        new_left_pair = (new_list[-1], new_token)
+                        pair_freq[new_left_pair] = pair_freq.get(new_left_pair, 0) + cnt
 
-                    pair_freq[most_freq_pair] -= cnt
+                    # Right neighbor: look ahead
+                    if i + 2 < len(old_tuple):
+                        old_right_pair = (most_freq_pair[1], old_tuple[i + 2])
+                        pair_freq[old_right_pair] = (
+                            pair_freq.get(old_right_pair, 0) - cnt
+                        )
+                        new_right_pair = (new_token, old_tuple[i + 2])
+                        pair_freq[new_right_pair] = (
+                            pair_freq.get(new_right_pair, 0) + cnt
+                        )
 
-                    # update pair frequency table
-                    if prefix:
-                        add_pair = (prefix[-1], vocab[new_id])
-                        pair_freq[add_pair] += cnt
-                        delete_pair = (prefix[-1], most_freq_pair[0])
-                        pair_freq[delete_pair] -= cnt
-                    if suffix:
-                        add_pair = (vocab[new_id], suffix[0])
-                        pair_freq[add_pair] += cnt
-                        delete_pair = (most_freq_pair[1], suffix[0])
-                        pair_freq[delete_pair] -= cnt
+                    # Decrease count for the merged pair
+                    pair_freq[most_freq_pair] = pair_freq.get(most_freq_pair, 0) - cnt
 
+                    new_list.append(new_token)
+                    i += 2
                 else:
+                    new_list.append(old_tuple[i])
                     i += 1
 
-            new_pretoken_freq[pretoken_tuple] = cnt
+            new_tuple = tuple(new_list)
 
-        pretoken_freq = new_pretoken_freq
+            # Update pretoken_freq
+            del pretoken_freq[old_tuple]
+            if new_tuple in pretoken_freq:
+                pretoken_freq[new_tuple] += cnt
+            else:
+                pretoken_freq[new_tuple] = cnt
+
+            # Update pair_to_pretokens index
+            # Remove old_tuple from all its pairs
+            for j in range(len(old_tuple) - 1):
+                old_pair = (old_tuple[j], old_tuple[j + 1])
+                if (
+                    old_pair in pair_to_pretokens
+                    and old_tuple in pair_to_pretokens[old_pair]
+                ):
+                    pair_to_pretokens[old_pair].discard(old_tuple)
+
+            # Add new_tuple to all its pairs
+            for j in range(len(new_tuple) - 1):
+                new_pair = (new_tuple[j], new_tuple[j + 1])
+                if new_pair not in pair_to_pretokens:
+                    pair_to_pretokens[new_pair] = set()
+                pair_to_pretokens[new_pair].add(new_tuple)
+
+        # Clean up the merged pair from index
+        if most_freq_pair in pair_to_pretokens:
+            del pair_to_pretokens[most_freq_pair]
+        if most_freq_pair in pair_freq:
+            del pair_freq[most_freq_pair]
 
     return (vocab, merges)
     # for i in range(len(pretoken_tuple)):
