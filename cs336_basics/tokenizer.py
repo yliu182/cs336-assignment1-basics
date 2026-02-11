@@ -1,12 +1,17 @@
-# pytest cs336-assignment1-basics/tests/test_tokenizer.py
+# uv run pytest cs336-assignment1-basics/tests/test_tokenizer.py
+#
+# uv run python -m cs336_basics.tokenizer --vocab-path tests/fixtures/gpt2_vocab.json  --merges-path tests/fixtures/gpt2_merges.txt
 
+from argparse import ArgumentParser
 from collections.abc import Iterable
+from pathlib import Path
 
 import regex as re
 from cs336_basics.io import (
     get_tokenizer_from_vocab_merges_path,
     GPT2_PRETOKENIZER_PATTERN,
 )
+from cs336_basics.train_bpe import train_bpe
 from tqdm import tqdm
 
 
@@ -177,3 +182,123 @@ class Tokenizer:
         """
         text_bytes = b"".join([self.vocab["int_to_byte"][i] for i in ids])
         return text_bytes.decode("utf-8", errors="replace")
+
+    def save_vocab_and_merges_to_files(
+        self,
+        vocab: dict[int, bytes],
+        merges: list[tuple[bytes, bytes]],
+        vocab_path: str,
+        merges_path: str,
+    ):
+        """
+        Save vocab and merges to files in GPT-2 format.
+
+        Args:
+            vocab: dict mapping token_id (int) -> token_bytes (bytes)
+            merges: list of (bytes, bytes) tuples representing merge operations
+            vocab_path: path to save vocab JSON file
+            merges_path: path to save merges text file
+        """
+        # Get the byte-to-unicode mapping (for human-readable output)
+        byte_to_unicode = gpt2_bytes_to_unicode()
+
+        # Convert vocab: bytes -> unicode string representation
+        # Format: {"token_string": token_id, ...}
+        vocab_json = {}
+        for token_id, token_bytes in vocab.items():
+            # Convert each byte to its unicode representation
+            token_str = "".join(byte_to_unicode[b] for b in token_bytes)
+            vocab_json[token_str] = token_id
+
+        # Save vocab as JSON
+        with open(vocab_path, "w", encoding="utf-8") as f:
+            json.dump(vocab_json, f, ensure_ascii=False)
+
+        # Save merges as text file (one merge per line, space-separated)
+        with open(merges_path, "w", encoding="utf-8") as f:
+            for token1, token2 in merges:
+                # Convert bytes to unicode string representation
+                str1 = "".join(byte_to_unicode[b] for b in token1)
+                str2 = "".join(byte_to_unicode[b] for b in token2)
+                f.write(f"{str1} {str2}\n")
+
+    @staticmethod
+    def load_vocab_and_merges(
+        vocab_path: str,
+        merges_path: str,
+    ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+        vocab, merges = get_tokenizer_from_vocab_merges_path(
+            vocab_path,
+            merges_path,
+        )
+        return vocab, merges
+
+
+def parse_args():
+    p = ArgumentParser()
+    p.add_argument("--vocab-path", required=True)
+    p.add_argument("--merges-path", required=True)
+    return p.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+
+    # Theme 1: read vocab and merges from files
+    tok = Tokenizer.from_files(
+        args.vocab_path,
+        args.merges_path,
+        special_tokens=["<|endoftext|>"],
+    )
+
+    # print(tok.encode("hello world"))
+    input_dir = Path(args.data_path)
+
+    # theme 2: just read the raw text, and train the tokenizer from scratch
+    # my_vocab, my_merges = train_bpe(
+    #     "tests/fixtures/tinystories_sample_5M.txt", 500, ["<|endoftext|>"]
+    # )
+    # tok = Tokenizer(my_vocab, my_merges, special_tokens=["<|endoftext|>"])
+    # print(tok.encode("hello world"))
+
+    # theme 3: calculate compression ratio
+    compression_ratios = {}
+
+    #  iterates through all files in a directory that end with "_val.txt" using the glob method with a wildcard pattern.
+    for f in input_dir.glob("*_val.txt"):
+        # sample 100 docs from each dataset
+        ratios = []
+        for doc in re.split(tok.split_re, f.read_text())[:200]:
+            if doc != "<|endoftext|>" and doc:
+                n_bytes = len(doc.encode())
+                # print(doc)
+                toks = tok.encode(doc)
+                # print(toks)
+                n_tokens = len(toks)
+                ratio = n_bytes / n_tokens
+                ratios.append(ratio)
+        avg_ratio = np.mean(ratios)
+        print(f"{f.name} compression ratio: {avg_ratio:.2f}")
+        compression_ratios[f.name] = avg_ratio
+    # (input_dir / args.stats_name).write_text(json.dumps(compression_ratios))
+    print(compression_ratios)
+    # tokenized_path = Path(args.tokenized_data_path)
+    # tokenized_path.mkdir(exist_ok=True, parents=True)
+
+    # fpaths = list(input_dir.glob("*train.txt"))
+    # if args.include_val_data == 1:
+    #     fpaths.extend(list(input_dir.glob("*val.txt")))
+    # for fpath in fpaths:
+    #     t0 = time.monotonic()
+    #     tokens = tok.encode_file(fpath, chunk_size=8 * 1024 * 1024)
+    #     taken = time.monotonic() - t0
+    #     logger.info(f"Processed {str(fpath)}")
+    #     logger.info(f"Took {taken:.1f} s.")
+    #     logger.info(
+    #         f"Throughput: {fpath.stat().st_size / (1024 * 1024) / taken:.2f} MB/s"
+    #     )
+    #     fname = fpath.name
+    #     np.save(
+    #         str((tokenized_path / fname).with_suffix(".npy")),
+    #         np.array(tokens, dtype="uint16"),
+    #     )

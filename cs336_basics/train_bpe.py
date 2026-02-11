@@ -1,4 +1,4 @@
-# pytest cs336-assignment1-basics/tests/test_train_bpe.py
+# uv run pytest cs336-assignment1-basics/tests/test_train_bpe.py
 import logging
 import os
 from collections import Counter, defaultdict
