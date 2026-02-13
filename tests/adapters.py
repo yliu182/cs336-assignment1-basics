@@ -6,13 +6,14 @@ from collections.abc import Iterable
 from multiprocessing import Pool
 from typing import Any, BinaryIO, IO
 
-import numpy.typing as npt
+import numpy.typing as np
 import regex as re
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 from cs336_basics.train_bpe import *
 from cs336_basics.tokenizer import *
+from cs336_basics.transformer.core import Linear
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
@@ -35,8 +36,10 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
-
-    raise NotImplementedError
+    linear = Linear(d_in, d_out)
+    linear.load_state_dict({"weight": weights})
+    # forward path
+    return linear(in_features)
 
 
 def run_embedding(
