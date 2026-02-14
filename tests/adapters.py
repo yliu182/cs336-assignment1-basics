@@ -13,11 +13,12 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 from cs336_basics.train_bpe import *
 from cs336_basics.tokenizer import *
-from cs336_basics.transformer.core import Linear
+from cs336_basics.transformer.core import Embedding, Linear
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 
+# uv run pytest -k test_linear
 def run_linear(
     d_in: int,
     d_out: int,
@@ -42,6 +43,7 @@ def run_linear(
     return linear(in_features)
 
 
+# uv run pytest -k test_embedding
 def run_embedding(
     vocab_size: int,
     d_model: int,
@@ -60,8 +62,11 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
+    emb = Embedding(vocab_size, d_model)
+    emb.load_state_dict({"weight": weights})
 
-    raise NotImplementedError
+    # forward path
+    return emb(token_ids)
 
 
 def run_swiglu(
