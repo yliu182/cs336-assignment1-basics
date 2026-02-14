@@ -13,7 +13,7 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 from cs336_basics.train_bpe import *
 from cs336_basics.tokenizer import *
-from cs336_basics.transformer.core import Embedding, Linear
+from cs336_basics.transformer.core import Embedding, Linear, RMSNorm
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
@@ -373,6 +373,7 @@ def run_transformer_lm(
     raise NotImplementedError
 
 
+# uv run pytest -k test_rmsnorm.
 def run_rmsnorm(
     d_model: int,
     eps: float,
@@ -393,7 +394,9 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    rms_norm = RMSNorm(d_model, eps, gains=weights)
+    out: Float[Tensor, " ... d_model"] = rms_norm.forward(in_features)
+    return out
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:

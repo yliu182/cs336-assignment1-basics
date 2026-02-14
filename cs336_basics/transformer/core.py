@@ -54,3 +54,32 @@ class Embedding(nn.Module):
         return torch.index_select(self.weight, dim=0, index=x.reshape(-1)).view(
             *x.size(), -1
         )
+
+
+class RMSNorm(nn.Module):
+    def __init__(
+        self,
+        d_model: Int,
+        eps: float = 1e-5,
+        gains: Float[Tensor, " d_model"] = None,
+        device: str = None,
+        dtype: str = None,
+    ):
+        super().__init__()
+        if gains is None:
+            gains = torch.ones(d_model, device=device, dtype=dtype)
+        self.gain = nn.Parameter(gains)
+        self.eps = eps
+
+    def forward(
+        self, x: Float[Tensor, "batch_size sequence_length d_model"]
+    ) -> Float[Tensor, "batch_size sequence_length d_model"]:
+
+        in_dtype = x.dtype
+        x = x.to(torch.float32)
+        with torch.autocast(device_type="cuda", enabled=False):
+            reverse_rms = torch.rsqrt((x * x).mean(-1) + self.eps).unsqueeze(-1)
+            out: Float[Tensor, "batch_size sequence_length d_model"] = (
+                x * reverse_rms * self.gain
+            )
+        return out.to()
